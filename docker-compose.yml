@@ -3,9 +3,9 @@ version: '3.9'
 x-backend-env: &backend-env
   FLASK_ENV: ${FLASK_ENV:-production}
   DATABASE_URL: postgresql://spotifyuser:${POSTGRES_PASSWORD:-spotifypass}@postgres:5432/spotify_analyzer
-  REDIS_URL: redis://redis:6379/0
-  CELERY_BROKER_URL: redis://redis:6379/1
-  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  REDIS_URL: redis://localhost:6379/0
+  CELERY_BROKER_URL: redis://localhost:6379/1
+  CELERY_RESULT_BACKEND: redis://localhost:6379/2
   SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
   SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
   SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:80/callback}
