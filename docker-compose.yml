@@ -1,0 +1,145 @@
+version: '3.9'
+
+x-backend-env: &backend-env
+  FLASK_ENV: ${FLASK_ENV:-production}
+  DATABASE_URL: postgresql://spotifyuser:${POSTGRES_PASSWORD:-spotifypass}@postgres:5432/spotify_analyzer
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
+  SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
+  SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:80/callback}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+  FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: spotify_analyzer
+      POSTGRES_USER: spotifyuser
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spotifypass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spotifyuser -d spotify_analyzer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Migration job: runs once, exits cleanly ───────────────────────────────
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Override ENTRYPOINT so it does not loop; just run migrations and exit
+    entrypoint: []
+    command: >
+      sh -c "
+        echo 'Waiting for PostgreSQL...' &&
+        until python -c \"import os,psycopg2; psycopg2.connect(os.environ['DATABASE_URL'])\" 2>/dev/null; do sleep 1; done &&
+        echo 'Running migrations...' &&
+        if [ ! -f migrations/env.py ]; then flask db init; fi &&
+        flask db migrate -m 'auto' 2>&1 || true &&
+        flask db upgrade &&
+        echo 'Migrations complete.'
+      "
+    restart: "no"
+
+  # ── Backend API ───────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: []
+    command: gunicorn wsgi:app -w 4 -k gevent --bind 0.0.0.0:5000 --timeout 120 --access-logfile -
+
+  # ── Celery worker ─────────────────────────────────────────────────────────
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: []
+    command: celery -A celery_worker.celery worker --loglevel=info --concurrency=4
+
+  # ── Celery beat ───────────────────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: []
+    command: celery -A celery_worker.celery beat --loglevel=info
+
+  # ── Frontend ──────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    restart: unless-stopped
+
+  # ── Nginx reverse proxy ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  postgres_data:
+  redis_data:
